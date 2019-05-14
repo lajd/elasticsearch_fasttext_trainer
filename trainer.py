@@ -22,7 +22,6 @@ class FastTextTrainer:
         self.bsize = bsize
         self.save_model_pth = save_model_pth
         self.num_training_epochs = num_training_epochs
-        self.save_vocab_model_pth = save_vocab_model_pth
         self.must_have_fields = must_have_fields + [es_text_field]
         self.must_not_have_fields = must_not_have_fields
         # Training parameters
@@ -55,9 +54,6 @@ class FastTextTrainer:
             self.model = FastText(size=emb_dim, window=window, min_count=min_count, workers=workers)
             # Start iterating corpus and building vocab
             self.model.build_vocab(sentences=TextFieldIterator(index_name, es_text_field, self.must_have_fields, self.must_not_have_fields, bsize=self.bsize))
-        if self.save_vocab_model_pth:
-            print('Finished creating vocab; saving vocab model')
-            self.model.save(self.save_vocab_model_pth)
 
     def train(self):
         # Train model
