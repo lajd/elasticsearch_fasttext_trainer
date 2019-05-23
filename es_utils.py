@@ -5,32 +5,41 @@ from segtok import tokenizer
 
 
 class TextFieldIterator:
-    def __init__(self, index_name, es_field_name, must_have_fields=None, must_not_have_fields=None, bsize=100):
+    def __init__(self, index_name, es_field_name, must_have_fields=None,
+                 must_not_have_fields=None, bsize=100, use_analyzed_field=False):
         self.es_utility = ESUtility(index_name, bsize)
+        self.use_analyzed_field = use_analyzed_field
         self.es_field_name = es_field_name
         self.must_have_fields = must_have_fields or []
         self.must_not_have_fields = must_not_have_fields or []
 
     @staticmethod
-    def tokenize_text(text, do_lower=True):
-        """ Alter this method for custom tokenizer. By default, use segtok tokenizer.
-        """
-        if isinstance(text, list) and isinstance(text[0], str):
-            # Allow handling string-array fields in ES
-            text = ' '.join(text)
-        if do_lower:
-            text = text.lower()
+    def extract_tokens_from_termvectors(d, field_name):
+        # Termvectors are already tokenized; Need to sort position
+        tok_loc_tuples = []
+        for tok, tok_attrs in d['term_vectors'][field_name]['terms'].items():
+            tok_locs_elements = tok_attrs['tokens']
+            for loc_element in tok_locs_elements:
+                tok_loc_tuples.append((tok, loc_element['position']))
+        tokens = [i[0] for i in sorted(tok_loc_tuples, key=lambda x: x[1])]
+        return tokens
 
-        return tokenizer.word_tokenizer(text)
-
-    def sentences_iterator(self, do_lower=True):
+    def sentences_iterator(self, log_every=10000):
         # Do a full pass over the data set
-        for batch in self.es_utility.scroll_indexed_data(self.es_field_name, self.must_have_fields, self.must_not_have_fields):
+        c = 0
+        for batch in self.es_utility.scroll_indexed_data(self.es_field_name, self.must_have_fields,
+                                                         self.must_not_have_fields, self.use_analyzed_field):
             for d in batch:
-                source = d['_source']
-                text = source[self.es_field_name]
-                tokens = self.tokenize_text(text, do_lower)
+                if self.use_analyzed_field:
+                    tokens = self.extract_tokens_from_termvectors(d, self.es_field_name)
+                else:
+                    source = d['_source']
+                    text = source[self.es_field_name]
+                    tokens = tokenizer.word_tokenizer(text)
                 yield tokens
+                c += 1
+                if c % log_every == 0:
+                    print("Processed {} documents".format(c))
 
     def __iter__(self):
         return self.sentences_iterator()
@@ -47,7 +56,8 @@ class ESUtility:
             raise RuntimeError('Index {} not found'.format(index_name))
         self.bsize = bsize
 
-    def scroll_indexed_data(self, field_name, fields_must_exist=None, fields_must_not_exist=None, log_every_n_batches=500):
+    def scroll_indexed_data(self, field_name, fields_must_exist=None,
+                            fields_must_not_exist=None, use_analyzed_field=False, log_every_n_batches=500):
         if fields_must_exist is None: fields_must_exist = []
         if fields_must_not_exist is None: fields_must_not_exist = []
         fields_must_exist = list(set(fields_must_exist + [field_name]))
@@ -72,7 +82,17 @@ class ESUtility:
         scroll_size = len(data_scroll['hits']['hits'])
         bcount = 0
         while scroll_size > 0:
-            yield (data_scroll['hits']['hits'])
+            if not use_analyzed_field:
+                hits = data_scroll['hits']['hits']
+                yield hits
+            else:
+                # Make another request to yield termvectors
+                documents = {'ids': [x['_id'] for x in data_scroll['hits']['hits']]}
+                hits = self.es.mtermvectors(
+                    body=documents, doc_type='_doc', index=self.index_name,
+                    term_statistics=False, field_statistics=False
+                )
+                yield hits['docs']
             data_scroll = self.es.scroll(scroll_id=sid, scroll='5m')
             # Update the scroll ID
             sid = data_scroll['_scroll_id']
